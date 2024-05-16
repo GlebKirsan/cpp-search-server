@@ -4,6 +4,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <numeric>
 #include <set>
 #include <sstream>
 #include <string>
@@ -186,11 +187,8 @@ private:
       return 0;
     }
 
-    int result = 0;
-    for (int r : ratings) {
-      result += r;
-    }
-    return result / static_cast<int>(ratings.size());
+    return std::accumulate(ratings.begin(), ratings.end(), 0) /
+           static_cast<int>(ratings.size());
   }
 
   vector<Document> FindAllDocuments(const Query &query_words) const {
