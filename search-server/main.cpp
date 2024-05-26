@@ -15,17 +15,28 @@
 
 using namespace std;
 
-template <typename T>
-ostream& operator<<(ostream& output, const vector<T>& items) {
-    output << "["s;
+template <typename F, typename S>
+ostream& operator<<(ostream& output, const pair<F, S>& p) {
+    output << p.first << ": "s << p.second;
+    return output;
+}
+
+template <typename Container>
+void Print(ostream& output, const Container& items) {
     bool first_item = true;
-    for (const T& item : items) {
+    for (const auto& item : items) {
         if (!first_item) {
             output << ", "s;
         }
         output << item;
         first_item = false;
     }
+}
+
+template <typename T>
+ostream& operator<<(ostream& output, const vector<T>& items) {
+    output << "["s;
+    Print(output, items);
     output << "]"s;
     return output;
 }
@@ -33,14 +44,7 @@ ostream& operator<<(ostream& output, const vector<T>& items) {
 template <typename T>
 ostream& operator<<(ostream& output, const set<T>& items) {
     output << "{"s;
-    bool first_item = true;
-    for (const T& item : items) {
-        if (!first_item) {
-            output << ", "s;
-        }
-        output << item;
-        first_item = false;
-    }
+    Print(output, items);
     output << "}"s;
     return output;
 }
@@ -48,14 +52,7 @@ ostream& operator<<(ostream& output, const set<T>& items) {
 template <typename K, typename V>
 ostream& operator<<(ostream& output, const map<K, V>& items) {
     output << "{"s;
-    bool first_item = true;
-    for (const auto& [key, value] : items) {
-        if (!first_item) {
-            output << ", "s;
-        }
-        output << key << ": "s << value;
-        first_item = false;
-    }
+    Print(output, items);
     output << "}"s;
     return output;
 }
@@ -144,6 +141,17 @@ vector<int> ReadRating() {
     return ratings;
 }
 
+template <typename StringContainer>
+set<string> MakeUniqueNonEmptyStrings(const StringContainer& strings) {
+    set<string> non_empty_strings;
+    for (const string& str : strings) {
+        if (!str.empty()) {
+            non_empty_strings.insert(str);
+        }
+    }
+    return non_empty_strings;
+}
+
 enum class DocumentStatus { ACTUAL, IRRELEVANT, BANNED, REMOVED };
 
 struct Document {
@@ -169,49 +177,41 @@ class SearchServer {
 
     template <typename Container>
     SearchServer(const Container& stop_words) {
-        for (const string& word : stop_words) {
-            if (word.empty()) {
-                continue;
-            }
-            if (is_invalid(word)) {
-                throw invalid_argument("Stop word contains bad chars"s);
-            }
-            stop_words_.insert(word);
+        set<Word> uniquie_stop_words = MakeUniqueNonEmptyStrings(stop_words);
+        bool has_invalid_stop_word =
+            any_of(uniquie_stop_words.begin(), uniquie_stop_words.end(),
+                   [this](const Word& word) { return this->IsInvalid(word); });
+        if (has_invalid_stop_word) {
+            throw invalid_argument("Invalid stop word"s);
         }
+        stop_words_ = uniquie_stop_words;
     }
 
     void AddDocument(DocumentId document_id, const string& document,
                      DocumentStatus status, const vector<int>& ratings) {
-        if (document_id < 0 || document_id_to_status_.count(document_id) != 0 ||
-            is_invalid(document)) {
+        if (document_id < 0 ||
+            document_id_to_rating_and_rating_.count(document_id) != 0 ||
+            IsInvalid(document)) {
             throw invalid_argument("Bad document to add"s);
         }
         const vector<Word> words = SplitIntoWordsNoStop(document);
+        document_id_to_rating_and_rating_[document_id] =
+            pair(ComputeAverageRating(ratings), status);
         double step = 1. / words.size();
-        document_id_to_rating_[document_id] = ComputeAverageRating(ratings);
-        document_id_to_status_[document_id] = status;
         for (const Word& word : words) {
             tf_[word][document_id] += step;
         }
-        ++document_count_;
         document_id_orders_.push_back(document_id);
     }
 
-    vector<Document> FindTopDocuments(const string& raw_query,
-                                      DocumentStatus status) const {
+    vector<Document> FindTopDocuments(
+        const string& raw_query,
+        DocumentStatus status = DocumentStatus::ACTUAL) const {
         return FindTopDocuments(
             raw_query,
             [status]([[maybe_unused]] int document_id, DocumentStatus status_,
                      [[maybe_unused]] int rating) {
                 return status_ == status;
-            });
-    }
-
-    vector<Document> FindTopDocuments(const string& raw_query) const {
-        return FindTopDocuments(
-            raw_query, []([[maybe_unused]] int document_id,
-                          DocumentStatus status, [[maybe_unused]] int rating) {
-                return status == DocumentStatus::ACTUAL;
             });
     }
 
@@ -239,12 +239,13 @@ class SearchServer {
         return matched_documents;
     }
 
-    int GetDocumentCount() const { return document_count_; }
+    int GetDocumentCount() const { return document_id_orders_.size(); }
 
     tuple<vector<string>, DocumentStatus> MatchDocument(const string& raw_query,
                                                         int document_id) const {
         Query query = ParseQuery(raw_query);
-        DocumentStatus status = document_id_to_status_.at(document_id);
+        DocumentStatus status =
+            document_id_to_rating_and_rating_.at(document_id).second;
         for (const Word& word : query.minus_words) {
             if (tf_.at(word).count(document_id)) {
                 return tuple(vector<Word>(), status);
@@ -262,12 +263,7 @@ class SearchServer {
                      status);
     }
 
-    int GetDocumentId(int index) const {
-        if (index < 0 || index > GetDocumentCount()) {
-            throw out_of_range("Invalid index"s);
-        }
-        return document_id_orders_[index];
-    }
+    int GetDocumentId(int index) const { return document_id_orders_.at(index); }
 
    private:
     struct Query {
@@ -277,10 +273,9 @@ class SearchServer {
 
     map<Word, map<DocumentId, double>> tf_;
     set<Word> stop_words_;
-    map<DocumentId, int> document_id_to_rating_;
-    map<DocumentId, DocumentStatus> document_id_to_status_;
+    map<DocumentId, pair<int, DocumentStatus>>
+        document_id_to_rating_and_rating_;
     vector<DocumentId> document_id_orders_;
-    int document_count_ = 0;
 
     bool IsStopWord(const Word& word) const {
         return stop_words_.count(word) > 0;
@@ -296,28 +291,44 @@ class SearchServer {
         return words;
     }
 
+    struct QueryWord {
+        string data;
+        bool is_minus;
+        bool is_stop;
+    };
+
+    QueryWord ParseQueryWord(string text) const {
+        if (IsInvalid(text)) {
+            throw invalid_argument("Invalid query"s);
+        }
+        bool is_minus = (text[0] == '-');
+        if (is_minus) {
+            if (text.size() == 1 || text[1] == '-') {
+                throw invalid_argument("Invalid minus word"s);
+            }
+            text = text.substr(1);
+        }
+        return {text, is_minus, IsStopWord(text)};
+    }
+
     Query ParseQuery(const string& text) const {
         Query query;
-        for (const Word& query_word : SplitIntoWordsNoStop(text)) {
-            bool is_minus = query_word[0] == '-';
-            if (is_invalid(query_word)) {
-                throw invalid_argument("Invalid query"s);
-            }
-            if (is_minus) {
-                if (query_word.size() == 1 || query_word[1] == '-') {
-                    throw invalid_argument("Invalid minus word"s);
+        for (const Word& word : SplitIntoWordsNoStop(text)) {
+            QueryWord query_word = ParseQueryWord(word);
+            if (!query_word.is_stop) {
+                if (query_word.is_minus) {
+                    query.minus_words.insert(query_word.data);
+                } else {
+                    query.plus_words.insert(query_word.data);
                 }
-                string word = query_word.substr(1);
-                query.minus_words.insert(word);
-            } else {
-                query.plus_words.insert(query_word);
             }
         }
         return query;
     }
 
     double CalculateIDF(size_t documents_number) const {
-        return log(static_cast<double>(document_count_) / documents_number);
+        return log(static_cast<double>(document_id_orders_.size()) /
+                   documents_number);
     }
 
     static int ComputeAverageRating(const vector<int>& ratings) {
@@ -351,15 +362,15 @@ class SearchServer {
             }
         }
         for (const auto& [document_id, rel] : relevance) {
-            int rating = document_id_to_rating_.at(document_id);
-            DocumentStatus status = document_id_to_status_.at(document_id);
+            const auto [rating, status] =
+                document_id_to_rating_and_rating_.at(document_id);
             matched_documents.push_back({document_id, rel, rating});
             matched_documents.back().status = status;
         }
         return matched_documents;
     }
 
-    bool is_invalid(const string& text) const {
+    bool IsInvalid(const string& text) const {
         return any_of(text.begin(), text.end(),
                       [](const char& c) { return 0 <= c && c <= 31; });
     }
